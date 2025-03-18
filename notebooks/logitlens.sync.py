@@ -33,8 +33,8 @@ import plotly.express as px
 import plotly.graph_objs as go
 from plotly.subplots import make_subplots
 
-from record_utils import record_activations, get_module
-from HookedQwen import convert_to_hooked_model
+from src.record_utils import record_activations, get_module
+from src.HookedQwen import convert_to_hooked_model
 from src.utils import seed_all, load_model, get_dataloader
 
 # %%
@@ -370,6 +370,7 @@ for batch_idx, batch in enumerate(valid_dataloader):
         break
 
 
+breakpoint()
 # %%
 
 print(samples[0]["resid_stream"].shape)
