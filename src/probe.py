@@ -657,15 +657,15 @@ if __name__ == "__main__":
         "valid_size": 256,
         "max_prompt_length": 256,
         "max_response_length": 200,
-        "save_path": "probe_checkpoints/probe_attn_out_parenthesis",
+        "save_path": "probe_checkpoints/resid_stream_parenthesis",
         "n_layers": 36,
         "d_model": 2048,
         "patience": 10,
-        #"probe_timestep": "last_int",
+        # "probe_timestep": "last_int",
         "probe_timestep": "(",
         "log_interval": 5,
         "eval_interval": 50,
-        "probe_module": "attn",
+        "probe_module": "resid_stream",
     }
     n_layers = config["n_layers"]
     probe_module = config["probe_module"]
@@ -679,8 +679,6 @@ if __name__ == "__main__":
             f"model.layers.{idx}.self_attn" for idx in range(n_layers)
         ]
     elif probe_module == "attn_o_proj":
-        print("Qwen attn output == attn_o_proj.")
-        breakpoint()
         config["record_module_names"] = [
             f"model.layers.{idx}.self_attn.o_proj" for idx in range(n_layers)
         ]
