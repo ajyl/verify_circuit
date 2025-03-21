@@ -34,6 +34,7 @@ import einops
 import plotly.graph_objs as go
 import plotly.express as px
 from plotly.subplots import make_subplots
+import matplotlib.pyplot as plt
 
 from src.record_utils import record_activations, get_module, untuple_tensor
 
@@ -101,21 +102,13 @@ seed_all(42)
 
 # %%
 
-model_path = os.path.join(base_dir, "checkpoints/TinyZero/v4/actor/global_step_300")
 
-tokenizer = AutoTokenizer.from_pretrained(model_path)
-
-actor_model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto")
-
-# %%
-
-base_model = AutoModelForCausalLM.from_pretrained(
-    "Qwen/Qwen2.5-3B-Instruct", device_map="auto"
-)
+model_name = "Qwen/Qwen2.5-3B"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+base_model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
 
 # %%
 
-convert_to_hooked_model(actor_model)
 convert_to_hooked_model(base_model)
 
 
@@ -204,7 +197,6 @@ hook_attn_heads = [
 
 # %%
 
-num_samples = 100
 all_yes_probs = []
 all_no_probs = []
 all_yes_probs_normalized = []
@@ -214,7 +206,7 @@ all_no_probs_hooked = []
 all_yes_probs_hooked_normalized = []
 all_no_probs_hooked_normalized = []
 preds = []
-for sample in tqdm(sample_data[:num_samples]):
+for sample in tqdm(sample_data):
     nums = sample["nums"]
     target = sample["target"]
 
@@ -314,3 +306,73 @@ print(np.mean(all_yes_probs_normalized))
 print(np.mean(all_yes_probs_hooked_normalized))
 print(np.mean(all_no_probs_normalized))
 print(np.mean(all_no_probs_hooked_normalized))
+
+# %%
+
+
+# Replace these with your actual numbers
+yes_before = np.mean(all_yes_probs_normalized)
+no_before = np.mean(all_no_probs_normalized)
+yes_after = np.mean(all_yes_probs_hooked_normalized)
+no_after = np.mean(all_no_probs_hooked_normalized)
+
+# Categories and values
+# categories = ["Yes", "No"]
+categories = ["Original", "Intervened"]
+before = [yes_before, no_before]
+after = [yes_after, no_after]
+values = [yes_before, no_before, yes_after, no_after]
+bar_labels = ["Yes", "No", "Yes", "No"]
+group_labels = ["Original", "", "Intervened", ""]
+
+x = range(len(values))
+# width = 0.35
+
+fig, ax = plt.subplots(figsize=(5, 3))
+
+width = 0.35
+x_positions = [0, width*2+0.1, 2, width*8]
+bars = ax.bar(x_positions, values, color=["tab:blue", "tab:orange", "tab:blue", "tab:orange"])
+# bars1 = ax.bar([p - width / 2 for p in x], before, width, label="Before Intervention")
+# bars2 = ax.bar([p + width / 2 for p in x], after, width, label="After Intervention")
+
+for idx, bar in enumerate(bars):
+    yval = bar.get_height()
+    offset = 0
+    if idx in [0, 3]:
+        offset = -0.13
+    ax.text(
+        bar.get_x() + bar.get_width() / 2,
+        yval + offset,
+        round(float(yval), 2),
+        ha="center",
+        va="bottom",
+        fontsize=16,
+    )
+
+# Labels and styling
+ax.set_xticks(x_positions)
+ax.set_xticklabels(bar_labels, fontsize=16)
+
+ax2 = ax.twiny()
+ax2.set_xlim(ax.get_xlim())
+ax2.tick_params(axis="x", length=0)
+
+ax2.spines["top"].set_visible(False)
+ax2.xaxis.set_ticks_position("bottom")
+ax2.xaxis.set_label_position("bottom")
+ax2.spines["bottom"].set_position(("axes", -0.15))
+ax2.set_frame_on(True)
+ax2.patch.set_visible(False)
+ax2.spines["bottom"].set_visible(False)
+ax2.set_xticks([0.4, 2.35])
+ax2.set_xticklabels(["Original", "Intervened"], fontsize=16)
+# ax.legend()
+
+ax.set_yticklabels(["0", "0.2", "0.4", "0.6", "0.8", "1.0"], fontsize=16)
+
+ax.set_ylabel("(Normalized) Probs.", fontsize=16)
+plt.tight_layout()
+fig.savefig("base_model_intervene.png", dpi=300)
+fig.savefig("base_model_intervene.pdf", dpi=300)
+plt.show()
