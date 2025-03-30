@@ -347,6 +347,7 @@ generation_config = GenerationConfig(do_sample=False)
 # %%
 
 token_this = tokenizer.encode("this")[0]  # 574
+token_equals = tokenizer.encode("equals")[0]  
 token_open = tokenizer.encode(" (")[0]  # 320
 token_not = tokenizer.encode("not")[0]  # 1921
 
@@ -366,7 +367,7 @@ def run(actor, samples, hook_config, batch_size, include_orig=False, test_size=N
     assert prompt in ["orig", "open_parenthesis"]
     max_gen_length = 300
     if prompt == "open_parenthesis":
-        max_gen_length = 50
+        max_gen_length = 100
 
     generated_tokens = set()
     generated_tokens2 = set()
@@ -453,16 +454,18 @@ def run(actor, samples, hook_config, batch_size, include_orig=False, test_size=N
         num_not += (preds == token_not).sum().item()
         generated_tokens.update(preds.tolist())
 
-        this_count += (hooked_output == token_this).any(dim=1).sum().item()
+        this_count += ((hooked_output == token_this).any(dim=1) | (
+            hooked_output == token_equals
+        ).any(dim=1)).sum().item()
 
         mask = hooked_output[:, :-1] == token_open
         tokens_after_parenthesis = hooked_output[:, 1:][mask]
         generated_tokens2.update(tokens_after_parenthesis.tolist())
 
-        if len(set(tokens_after_parenthesis.tolist())) > 1:
-            print("Hmm.")
-            print(tokenizer.batch_decode(tokens_after_parenthesis))
-            odd_batches.append(batch_idx)
+        #if len(set(tokens_after_parenthesis.tolist())) > 1:
+        #    print("Hmm.")
+        #    print(tokenizer.batch_decode(tokens_after_parenthesis))
+        #    odd_batches.append(batch_idx)
 
         total += len(curr_batch)
 
@@ -547,6 +550,7 @@ print(f"Orig this percentage: {orig_this_perc}")
 
 # MLP (only [1]):
 
+print("Running MLP (only [1])")
 hook_config = build_mlp_hook_config(actor, probe_model, [1], list(range(18, 36)), 50)
 mlp_1_not_perc, mlp_1_this_perc = run(
     actor, samples, hook_config, batch_size, include_orig=False,
@@ -554,11 +558,11 @@ mlp_1_not_perc, mlp_1_this_perc = run(
 print(f"MLP 1 not percentage: {mlp_1_not_perc}")
 print(f"MLP 1 this percentage: {mlp_1_this_perc}")
 
-
 # %%
 
 # MLP (Both [0, 1]):
 
+print("Running MLP (both [0, 1])")
 hook_config = build_mlp_hook_config(actor, probe_model, [0, 1], list(range(18, 36)), 50)
 mlp_both_not_perc, mlp_both_this_perc = run(
     actor, samples, hook_config, batch_size, include_orig=False,
@@ -566,10 +570,11 @@ mlp_both_not_perc, mlp_both_this_perc = run(
 print(f"MLP both not percentage: {mlp_both_not_perc}")
 print(f"MLP both this percentage: {mlp_both_this_perc}")
 
-# %%
+## %%
 
 # Attention:
 
+print("Running Attention")
 hook_config = build_attn_hook_config()
 attn_not_perc, attn_this_perc = run(
     actor, samples, hook_config, batch_size, include_orig=False,

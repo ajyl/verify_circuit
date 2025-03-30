@@ -105,7 +105,8 @@ seed_all(42)
 
 model_name = "Qwen/Qwen2.5-3B"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-base_model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
+with torch.device("cuda"):
+    base_model = AutoModelForCausalLM.from_pretrained(model_name)
 
 # %%
 
@@ -114,7 +115,7 @@ convert_to_hooked_model(base_model)
 
 # %%
 
-sample_data = torch.load(os.path.join(base_dir, "data/test_set2.pt"))
+sample_data = torch.load(os.path.join(base_dir, "data/countdown/test_set2.pt"))
 
 # %%
 
@@ -370,6 +371,7 @@ ax2.set_xticklabels(["Original", "Intervened"], fontsize=16)
 # ax.legend()
 
 ax.set_yticklabels(["0", "0.2", "0.4", "0.6", "0.8", "1.0"], fontsize=16)
+ax.set_title("Intervention on Base Model", fontsize=16)
 
 ax.set_ylabel("(Normalized) Probs.", fontsize=16)
 plt.tight_layout()
