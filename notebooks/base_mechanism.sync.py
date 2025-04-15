@@ -502,7 +502,7 @@ batch_size = 4
 # %%
 
 actor_prev_token_heads, actor_attn_pattern = get_prev_token_heads(
-    actor, samples[:dev_size], batch_size, thresh=0.05
+    actor, samples[:dev_size], batch_size, thresh=0.1
 )
 
 # %%
