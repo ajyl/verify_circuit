@@ -35,7 +35,6 @@ from plotly.subplots import make_subplots
 from src.record_utils import record_activations, get_module, untuple_tensor
 from src.utils import load_model
 from src.HookedQwen import convert_to_hooked_model
-from src.rl_dataset import RLHFDataset
 
 # %%
 
@@ -94,75 +93,6 @@ def _turn_off_mlp(model, layer_idx, mlp_idxs):
 
     module = model.model.layers[layer_idx].mlp.hook_mlp_mid
     return module.register_forward_hook(hook)
-
-
-# %%
-
-
-@torch.no_grad()
-def generate(
-    model,
-    input_ids,
-    attention_mask,
-    max_new_tokens,
-    block_size,
-    eos_token_id,
-):
-    """
-    Generate text using a transformer language model with greedy sampling.
-
-    Args:
-        model: The auto-regressive transformer model that outputs logits.
-        input_ids: A tensor of shape (batch_size, sequence_length) representing the initial token indices.
-        max_new_tokens: The number of new tokens to generate.
-        block_size: The maximum sequence length (context window) the model can handle.
-        device: The device on which computations are performed.
-
-    Returns:
-        A tensor containing the original context concatenated with the generated tokens.
-    """
-    model.eval()  # Set the model to evaluation mode
-    input_ids = input_ids.to("cuda")
-    attention_mask = attention_mask.to("cuda")
-    batch_size = input_ids.shape[0]
-
-    finished = torch.zeros(batch_size, dtype=torch.bool).to("cuda")
-
-    for _ in tqdm(range(max_new_tokens)):
-        if finished.all():
-            break
-
-        if input_ids.shape[1] > block_size:
-            idx_cond = input_ids[:, -block_size:]
-            attn_mask_cond = attention_mask[:, -block_size:]
-        else:
-            idx_cond = input_ids
-            attn_mask_cond = attention_mask
-
-        position_ids = attn_mask_cond.long().cumsum(-1) - 1
-        position_ids.masked_fill_(attn_mask_cond == 0, 1)
-
-        output = model(
-            idx_cond.to(model.device),
-            attention_mask=attn_mask_cond.to(model.device),
-            position_ids=position_ids.to(model.device),
-            return_dict=True,
-        )
-        logits = output["logits"]
-        logits = logits[:, -1, :]  # shape: (batch, vocab_size)
-
-        next_token = torch.argmax(logits, dim=-1, keepdim=True)
-
-        new_finished = (~finished) & (next_token.squeeze(1) == eos_token_id)
-        finished |= new_finished
-        next_token[finished] = eos_token_id
-
-        # Append the predicted token to the sequence
-        input_ids = torch.cat([input_ids, next_token], dim=1)
-        new_mask = torch.ones((batch_size, 1), dtype=attention_mask.dtype).to("cuda")
-        attention_mask = torch.cat([attention_mask, new_mask], dim=1)
-
-    return input_ids
 
 
 # %%
@@ -285,8 +215,6 @@ def generate_hooked(
 
 # %%
 
-# %%
-
 
 def get_mlp_value_vecs(model):
     mlp_value_vecs = [layer.mlp.down_proj.weight for layer in model.model.layers]
@@ -328,13 +256,11 @@ seed_all(config["seed"])
 assert torch.cuda.is_available()
 
 model_path = config["model_path"]
-# tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-# with torch.device("cuda"):
-#    actor = AutoModelForCausalLM.from_pretrained(
-#        model_path, trust_remote_code=True, device_map="auto"
-#    )
-actor = load_model(config["model_path"])
-tokenizer = actor.tokenizer
+tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+with torch.device("cuda:0"):
+   actor = AutoModelForCausalLM.from_pretrained(
+       model_path, trust_remote_code=True,
+   )
 
 # %%
 
@@ -347,7 +273,7 @@ generation_config = GenerationConfig(do_sample=False)
 # %%
 
 token_this = tokenizer.encode("this")[0]  # 574
-token_equals = tokenizer.encode("equals")[0]  
+token_equals = tokenizer.encode("equals")[0]
 token_open = tokenizer.encode(" (")[0]  # 320
 token_not = tokenizer.encode("not")[0]  # 1921
 
@@ -362,26 +288,17 @@ probe_model = torch.load(config["probe_path"]).detach().cuda()
 # %%
 
 
-def run(actor, samples, hook_config, batch_size, include_orig=False, test_size=None):
-    prompt = "open_parenthesis"
-    assert prompt in ["orig", "open_parenthesis"]
-    max_gen_length = 300
-    if prompt == "open_parenthesis":
-        max_gen_length = 100
+def run(actor, samples, hook_config, batch_size, test_size=None):
+    max_gen_length = 50
 
-    generated_tokens = set()
-    generated_tokens2 = set()
     this_timesteps = []
     all_generations = []
     odd_batches = []
 
-    # Metrics:
-    # 1) # of times the prediction changed from "this" to "not"
-    num_not = 0
     total = 0
-
-    # 2) # of times the model never realizes it has found a solution.
-    this_count = 0
+    success = 0
+    mix = 0
+    fail = 0
 
     if test_size is None:
         test_size = len(samples)
@@ -396,38 +313,21 @@ def run(actor, samples, hook_config, batch_size, include_orig=False, test_size=N
             dim=0,
         ).to("cuda")
 
-        if include_orig:
-            orig_output = actor.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=300,
-                eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.pad_token_id,
-                generation_config=generation_config,
-                output_scores=False,  # this is potentially very large
-                return_dict_in_generate=True,
-                use_cache=True,
-            )
-            orig_output_text = tokenizer.batch_decode(
-                orig_output.sequences, skip_special_tokens=True
-            )
-
         _this_timestep = [sample["this_timestep"] + 1 for sample in curr_batch]
         this_timesteps.extend(_this_timestep)
 
-        if prompt == "open_parenthesis":
-            _input_ids = [
-                curr_batch[_idx]["response"][: _this_timestep[_idx]]
-                for _idx in range(len(curr_batch))
-            ]
-            max_length = max(seq.shape[0] for seq in _input_ids)
-            padded_input_ids = []
-            for seq in _input_ids:
-                pad_length = max_length - seq.shape[0]
-                padded = F.pad(seq, (pad_length, 0), value=tokenizer.pad_token_id)
-                padded_input_ids.append(padded)
-            input_ids = torch.stack(padded_input_ids, dim=0).to("cuda")
-            attention_mask = input_ids != tokenizer.pad_token_id
+        _input_ids = [
+            curr_batch[_idx]["response"][: _this_timestep[_idx]]
+            for _idx in range(len(curr_batch))
+        ]
+        max_length = max(seq.shape[0] for seq in _input_ids)
+        padded_input_ids = []
+        for seq in _input_ids:
+            pad_length = max_length - seq.shape[0]
+            padded = F.pad(seq, (pad_length, 0), value=tokenizer.pad_token_id)
+            padded_input_ids.append(padded)
+        input_ids = torch.stack(padded_input_ids, dim=0).to("cuda")
+        attention_mask = input_ids != tokenizer.pad_token_id
 
         hooked_output = generate_hooked(
             actor,
@@ -443,33 +343,22 @@ def run(actor, samples, hook_config, batch_size, include_orig=False, test_size=N
         )
         all_generations.append(hooked_output_text)
 
-        if prompt == "orig":
-            preds = hooked_output[torch.arange(len(curr_batch)), _this_timestep]
-        elif prompt == "open_parenthesis":
-            preds = hooked_output[:, input_ids.shape[1]]
-        else:
-            raise ValueError("z")
-
-        # preds.shape: [batch]
-        num_not += (preds == token_not).sum().item()
-        generated_tokens.update(preds.tolist())
-
-        this_count += ((hooked_output == token_this).any(dim=1) | (
-            hooked_output == token_equals
-        ).any(dim=1)).sum().item()
-
-        mask = hooked_output[:, :-1] == token_open
-        tokens_after_parenthesis = hooked_output[:, 1:][mask]
-        generated_tokens2.update(tokens_after_parenthesis.tolist())
-
-        #if len(set(tokens_after_parenthesis.tolist())) > 1:
-        #    print("Hmm.")
-        #    print(tokenizer.batch_decode(tokens_after_parenthesis))
-        #    odd_batches.append(batch_idx)
+        generated_ids = hooked_output[:, input_ids.shape[1]:]
+        generated_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        for generation in generated_text:
+            if "this works" not in generation and "<answer>" not in generation:
+                success += 1
+            elif "this works" not in generation and "<answer>" in generation:
+                mix += 1
+            elif "this works" in generation and "<answer>" in generation:
+                fail += 1
+            else:
+                print("HMM??")
+                print(generation)
 
         total += len(curr_batch)
 
-    return num_not / total, this_count / total
+    return success / total, mix / total, fail / total
 
 
 # %%
@@ -496,40 +385,245 @@ def build_mlp_hook_config(actor, probe_model, labels, layers, k):
 # %%
 
 
-def build_attn_hook_config():
-    heads = [
-        (3, 13),
-        (4, 5),
-        (4, 0),
-        (5, 9),
-        (5, 14),
-        (10, 0),
-        (10, 5),
-        (11, 8),
-        (12, 3),
-        (13, 6),
-        (13, 3),
-        (15, 8),
-        (15, 4),
-        (17, 14),
-        (17, 13),
-        (17, 11),
-        (17, 10),
-        (17, 9),
-        (17, 3),
-        (17, 1),
-        (19, 13),
-        (19, 8),
-        (21, 7),
-        (21, 14),
-        (21, 2),
-        (22, 14),
-        (22, 12),
-        (25, 14),
-        (25, 11),
+def _get_occurrence_idxs(hay, needle):
+    window_size = needle.shape[0]
+    hay = hay.unfold(0, window_size, 1)
+    mask = (hay == needle).all(dim=1)
+    offset = window_size - 1
+    match_idxs = mask.nonzero(as_tuple=True)[0] + offset
+    return match_idxs
+
+
+@torch.no_grad()
+def _get_attn_density_for_target(actor, samples, batch_size):
+    n_layers = 36
+    record_module_names = [
+        f"model.layers.{idx}.self_attn.hook_attn_pattern" for idx in range(n_layers)
     ]
-    heads = [("attn_out", layer, head_idx) for layer, head_idx in heads]
-    return heads
+    test_size = len(samples)
+    _all_attn_pattern = []
+    all_recording = {}
+    cutoff = (
+        tokenizer(" Let's try different", return_tensors="pt")["input_ids"]
+        .squeeze()
+        .to("cuda")
+    )
+    all_attn_density = []
+    for batch_idx in tqdm(range(0, test_size, batch_size)):
+        curr_batch = samples[batch_idx : batch_idx + batch_size]
+        input_ids = torch.stack(
+            [curr_batch[_idx]["input_ids"] for _idx in range(len(curr_batch))], dim=0
+        ).to("cuda")
+        attention_mask = torch.stack(
+            [curr_batch[_idx]["attention_mask"] for _idx in range(len(curr_batch))],
+            dim=0,
+        ).to("cuda")
+
+        _this_timestep = [sample["this_timestep"] for sample in curr_batch]
+
+        _input_ids = [
+            curr_batch[_idx]["response"][: _this_timestep[_idx]]
+            for _idx in range(len(curr_batch))
+        ]
+        max_length = max(seq.shape[0] for seq in _input_ids)
+        padded_input_ids = []
+        for seq in _input_ids:
+            pad_length = max_length - seq.shape[0]
+            padded = F.pad(seq, (pad_length, 0), value=tokenizer.pad_token_id)
+            padded_input_ids.append(padded)
+        input_ids = torch.stack(padded_input_ids, dim=0).to("cuda")
+        attention_mask = input_ids != tokenizer.pad_token_id
+        position_ids = attention_mask.long().cumsum(-1) - 1
+        position_ids.masked_fill_(attention_mask == 0, 1)
+
+        with record_activations(actor, record_module_names) as recording:
+            output = actor(
+                input_ids.to(actor.device),
+                attention_mask=attention_mask.to(actor.device),
+                position_ids=position_ids.to(actor.device),
+                return_dict=True,
+            )
+
+        # [layers, batch, heads, seq]
+        _attn_pattern = torch.stack(
+            [
+                recording[f"model.layers.{layer_idx}.self_attn.hook_attn_pattern"][0][
+                    :, :, -1, :
+                ]
+                for layer_idx in range(n_layers)
+            ]
+        )
+        attn_density = []
+        for _idx in range(len(curr_batch)):
+            target_tokens = tokenizer(
+                str(curr_batch[_idx]["target"]), return_tensors="pt"
+            )["input_ids"].squeeze()
+            _context = input_ids[_idx]
+            cutoff_idx = _get_occurrence_idxs(_context, cutoff)
+            curr_context = _context[: cutoff_idx[0]]
+            match_idxs = _get_occurrence_idxs(
+                curr_context, target_tokens.to(curr_context.device)
+            )
+
+            # [layers, heads]
+            density = _attn_pattern[:, _idx, :, match_idxs].sum(dim=-1)
+            attn_density.append(density)
+
+    all_attn_density = torch.stack(attn_density, dim=0)
+    return all_attn_density.mean(dim=0)
+
+
+def _get_prev_token_heads(actor, samples, batch_size, thresh=0.1):
+    attn_pattern = _get_attn_density_for_target(actor, samples, config["batch_size"])
+    top_values, top_idxs = torch.topk(attn_pattern.flatten(), 50)
+    top_idxs = np.array(np.unravel_index(top_idxs.cpu().numpy(), attn_pattern.shape)).T
+    prev_token_heads = top_idxs[
+        (top_values > thresh).nonzero().squeeze().cpu()
+    ].squeeze()
+    return prev_token_heads, attn_pattern
+
+
+def _get_top_value_vecs(actor, probe_model, k):
+    value_vecs = get_mlp_value_vecs(actor)
+    top_cos_scores = {0: [], 1: []}
+    cos = F.cosine_similarity
+    for target_label in [0, 1]:
+        for target_probe_layer in range(18, 36):
+            target_probe = probe_model[target_probe_layer, :, target_label]
+
+            for layer_idx in range(0, target_probe_layer + 1):
+                cos_scores = cos(
+                    value_vecs[layer_idx], target_probe.unsqueeze(-1), dim=0
+                )
+                _topk = cos_scores.topk(k=k)
+                _values = [x.item() for x in _topk.values]
+                _idxs = [x.item() for x in _topk.indices]
+                topk = list(
+                    zip(
+                        _values,
+                        _idxs,
+                        [target_probe_layer] * _topk.indices.shape[0],
+                        [layer_idx] * _topk.indices.shape[0],
+                    )
+                )
+                top_cos_scores[target_label].extend(topk)
+
+    _sorted_scores_0 = sorted(top_cos_scores[0], key=lambda x: x[0], reverse=True)
+    _sorted_scores_1 = sorted(top_cos_scores[1], key=lambda x: x[0], reverse=True)
+
+    _unique = set()
+    sorted_scores_0 = []
+    for entry in _sorted_scores_0:
+        _pair = (entry[3], entry[1])
+        if _pair not in _unique:
+            _unique.add(_pair)
+            sorted_scores_0.append(_pair)
+
+    _unique = set()
+    sorted_scores_1 = []
+    for entry in _sorted_scores_1:
+        _pair = (entry[3], entry[1])
+        if _pair not in _unique:
+            _unique.add(_pair)
+            sorted_scores_1.append(_pair)
+
+    return sorted_scores_0, sorted_scores_1
+
+
+# %%
+
+
+def get_WO_WV_OV(actor):
+
+    n_layers = 36
+    n_heads = actor.config.num_attention_heads
+    n_kv_heads = actor.config.num_key_value_heads
+    n_kv_groups = n_heads // n_kv_heads
+    W_O = []
+    W_V = []
+    for idx in range(n_layers):
+
+        _W_O = actor.model.layers[idx].self_attn.o_proj.weight
+        _W_O = einops.rearrange(_W_O, "m (n h)->n h m", n=n_heads)
+        W_O.append(_W_O)
+
+        _W_V = actor.model.layers[idx].self_attn.v_proj.weight
+        _W_V = einops.rearrange(_W_V, "(n h) m->n m h", n=n_kv_heads)
+        _W_V = torch.repeat_interleave(_W_V, dim=0, repeats=n_kv_groups)
+        W_V.append(_W_V)
+
+    # [layers, heads, d_head, d_model]
+    W_O = torch.stack(W_O, dim=0)
+    W_V = torch.stack(W_V, dim=0)
+    OV = einsum(
+        "layers heads d_head d_model, layers heads d_model d_head -> layers heads d_model",
+        W_O,
+        W_V,
+    )
+    return W_O, W_V, OV
+
+
+def get_OV_for_attn_heads(actor, OV, attn_heads):
+    OVs = []
+    for attn_head in attn_heads:
+        layer_idx = attn_head[0]
+        head_idx = attn_head[1]
+        OVs.append(OV[layer_idx, head_idx])
+    return torch.stack(OVs, dim=0)
+
+
+def get_verification_heads(
+    actor, samples, prev_token_heads, probe_model, num_mlp_vecs=200
+):
+    top_scores_0, top_scores_1 = _get_top_value_vecs(actor, probe_model, k=50)
+    gate_vecs = torch.stack(
+        [
+            actor.model.layers[x[0]].mlp.gate_proj.weight[x[1]]
+            for x in top_scores_1[:num_mlp_vecs]
+        ],
+        dim=0,
+    )
+    up_proj_vecs = torch.stack(
+        [
+            actor.model.layers[x[0]].mlp.up_proj.weight[x[1]]
+            for x in top_scores_1[:num_mlp_vecs]
+        ],
+        dim=0,
+    )
+
+    W_O, W_V, _OV = get_WO_WV_OV(actor)
+    OV = get_OV_for_attn_heads(actor, _OV, prev_token_heads)
+
+    dots_gate = einsum("N d_model, L d_model -> N L", gate_vecs, OV)
+    act_fn = actor.model.layers[0].mlp.act_fn
+    acts = act_fn(dots_gate)
+
+    dots_up_proj = einsum("N d_model, L d_model -> N L", up_proj_vecs, OV)
+    weights = (acts * dots_up_proj).mean(dim=0)
+    top_val, top_idx = torch.topk(weights.flatten(), k=len(prev_token_heads))
+    top_idx = np.array(
+        np.unravel_index(top_idx.cpu().numpy(), weights.shape)
+    ).T.squeeze()
+    verif_heads = [prev_token_heads[x].tolist() for x in top_idx]
+    return verif_heads
+
+
+def build_attn_hook_config(
+    actor,
+    samples,
+    batch_size,
+    probe_model,
+    prev_token_thresh=0.1,
+    num_mlp_vecs=200,
+):
+    prev_token_heads, attn_pattern = _get_prev_token_heads(
+        actor, samples, batch_size, prev_token_thresh
+    )
+    verif_heads = get_verification_heads(
+        actor, samples, prev_token_heads, probe_model, num_mlp_vecs
+    )
+    heads = [("attn_out", layer, head_idx) for layer, head_idx in verif_heads]
+    return heads, attn_pattern
 
 
 # %%
@@ -539,45 +633,101 @@ batch_size = config["batch_size"]
 # %%
 
 # Orig:
-hook_config = []
-orig_not_perc, orig_this_perc = run(
-    actor, samples, hook_config, batch_size, include_orig=False,
-)
-print(f"Orig not percentage: {orig_not_perc}")
-print(f"Orig this percentage: {orig_this_perc}")
+#hook_config = []
+#orig_success, orig_mix, orig_fail = run(
+#   actor,
+#   samples,
+#   hook_config,
+#   batch_size,
+#)
+#print(f"Orig success: {orig_success}")
+#print(f"Orig mix: {orig_mix}")
+#print(f"Orig fail: {orig_fail}")
 
-# %%
+## %%
 
 # MLP (only [1]):
 
-print("Running MLP (only [1])")
-hook_config = build_mlp_hook_config(actor, probe_model, [1], list(range(18, 36)), 50)
-mlp_1_not_perc, mlp_1_this_perc = run(
-    actor, samples, hook_config, batch_size, include_orig=False,
-)
-print(f"MLP 1 not percentage: {mlp_1_not_perc}")
-print(f"MLP 1 this percentage: {mlp_1_this_perc}")
+#print("Running MLP (only [1])")
+#hook_config = build_mlp_hook_config(actor, probe_model, [1], list(range(18, 36)), 50)
+#mlp_1_success, mlp_1_mix, mlp_1_fail = run(
+#   actor,
+#   samples,
+#   hook_config,
+#   batch_size,
+#)
+#print(f"MLP 1 success: {mlp_1_success}")
+#print(f"MLP 1 mix: {mlp_1_mix}")
+#print(f"MLP 1 fail: {mlp_1_fail}")
 
-# %%
-
-# MLP (Both [0, 1]):
-
-print("Running MLP (both [0, 1])")
-hook_config = build_mlp_hook_config(actor, probe_model, [0, 1], list(range(18, 36)), 50)
-mlp_both_not_perc, mlp_both_this_perc = run(
-    actor, samples, hook_config, batch_size, include_orig=False,
-)
-print(f"MLP both not percentage: {mlp_both_not_perc}")
-print(f"MLP both this percentage: {mlp_both_this_perc}")
+## %%
+#
+## MLP (Both [0, 1]):
+#
+#print("Running MLP (both [0, 1])")
+#hook_config = build_mlp_hook_config(actor, probe_model, [0, 1], list(range(18, 36)), 50)
+#mlp_both_success, mlp_both_mix, mlp_both_fail = run(
+#   actor,
+#   samples,
+#   hook_config,
+#   batch_size,
+#)
+#print(f"MLP both success: {mlp_both_success}")
+#print(f"MLP both mix: {mlp_both_mix}")
+#print(f"MLP both fail: {mlp_both_fail}")
 
 ## %%
 
 # Attention:
 
+#print("Running Attention")
+#hook_config = build_attn_hook_config(
+#    actor,
+#    samples,
+#    batch_size,
+#    probe_model,
+#    _type="prev_tokens",
+#    num_heads=None,
+#    prev_token_thresh=0.1,
+#    num_mlp_vecs=200,
+#)
+#print(hook_config)
+#prev_tok_attn_success, prev_tok_attn_mix, prev_tok_attn_fail = run(
+#    actor,
+#    samples,
+#    hook_config,
+#    batch_size,
+#)
+#print(f"Attn prev_tok success: {prev_tok_attn_success}")
+#print(f"Attn prev_tok mix: {prev_tok_attn_mix}")
+#print(f"Attn prev_tok fail: {prev_tok_attn_fail}")
+
+## %%
+
+# Attention:
+
+dev_size = 50
 print("Running Attention")
-hook_config = build_attn_hook_config()
-attn_not_perc, attn_this_perc = run(
-    actor, samples, hook_config, batch_size, include_orig=False,
+hook_config, attn_pattern = build_attn_hook_config(
+    actor,
+    samples[:dev_size],
+    batch_size,
+    probe_model,
+    prev_token_thresh=0.1,
+    num_mlp_vecs=200,
 )
-print(f"Attn not percentage: {attn_not_perc}")
-print(f"Attn this percentage: {attn_this_perc}")
+print(hook_config)
+
+_hook_config = hook_config[:3]
+
+verif_attn_success, verif_attn_mix, verif_attn_fail = run(
+    actor,
+    samples[:dev_size],
+    _hook_config,
+    batch_size,
+)
+print(f"Attn verif success: {verif_attn_success}")
+print(f"Attn verif mix: {verif_attn_mix}")
+print(f"Attn verif fail: {verif_attn_fail}")
+
+
