@@ -289,7 +289,7 @@ probe_model = torch.load(config["probe_path"]).detach().cuda()
 
 
 def run(actor, samples, hook_config, batch_size, test_size=None):
-    max_gen_length = 50
+    max_gen_length = 100
 
     this_timesteps = []
     all_generations = []
@@ -354,6 +354,7 @@ def run(actor, samples, hook_config, batch_size, test_size=None):
                 fail += 1
             else:
                 print("HMM??")
+                print("Likely didn't reach <answer> token within 100 tokens.")
                 print(generation)
 
         total += len(curr_batch)
@@ -660,23 +661,23 @@ batch_size = config["batch_size"]
 #print(f"MLP 1 mix: {mlp_1_mix}")
 #print(f"MLP 1 fail: {mlp_1_fail}")
 
-## %%
-#
-## MLP (Both [0, 1]):
-#
-#print("Running MLP (both [0, 1])")
-#hook_config = build_mlp_hook_config(actor, probe_model, [0, 1], list(range(18, 36)), 50)
-#mlp_both_success, mlp_both_mix, mlp_both_fail = run(
-#   actor,
-#   samples,
-#   hook_config,
-#   batch_size,
-#)
-#print(f"MLP both success: {mlp_both_success}")
-#print(f"MLP both mix: {mlp_both_mix}")
-#print(f"MLP both fail: {mlp_both_fail}")
+# %%
 
-## %%
+# MLP (Both [0, 1]):
+
+print("Running MLP (both [0, 1])")
+hook_config = build_mlp_hook_config(actor, probe_model, [0, 1], list(range(18, 36)), 50)
+mlp_both_success, mlp_both_mix, mlp_both_fail = run(
+   actor,
+   samples,
+   hook_config,
+   batch_size,
+)
+print(f"MLP both success: {mlp_both_success}")
+print(f"MLP both mix: {mlp_both_mix}")
+print(f"MLP both fail: {mlp_both_fail}")
+
+# %%
 
 # Attention:
 
@@ -703,5 +704,6 @@ verif_attn_success, verif_attn_mix, verif_attn_fail = run(
 print(f"Attn verif success: {verif_attn_success}")
 print(f"Attn verif mix: {verif_attn_mix}")
 print(f"Attn verif fail: {verif_attn_fail}")
+
 
 
