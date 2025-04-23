@@ -680,32 +680,6 @@ batch_size = config["batch_size"]
 
 # Attention:
 
-#print("Running Attention")
-#hook_config = build_attn_hook_config(
-#    actor,
-#    samples,
-#    batch_size,
-#    probe_model,
-#    _type="prev_tokens",
-#    num_heads=None,
-#    prev_token_thresh=0.1,
-#    num_mlp_vecs=200,
-#)
-#print(hook_config)
-#prev_tok_attn_success, prev_tok_attn_mix, prev_tok_attn_fail = run(
-#    actor,
-#    samples,
-#    hook_config,
-#    batch_size,
-#)
-#print(f"Attn prev_tok success: {prev_tok_attn_success}")
-#print(f"Attn prev_tok mix: {prev_tok_attn_mix}")
-#print(f"Attn prev_tok fail: {prev_tok_attn_fail}")
-
-## %%
-
-# Attention:
-
 dev_size = 50
 print("Running Attention")
 hook_config, attn_pattern = build_attn_hook_config(
