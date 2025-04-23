@@ -288,7 +288,7 @@ probe_model = torch.load(config["probe_path"]).detach().cuda()
 # %%
 
 
-def run(actor, samples, hook_config, batch_size, test_size=None):
+def run(actor, samples, hook_config, batch_size)
     max_gen_length = 100
 
     this_timesteps = []
@@ -300,9 +300,7 @@ def run(actor, samples, hook_config, batch_size, test_size=None):
     mix = 0
     fail = 0
 
-    if test_size is None:
-        test_size = len(samples)
-
+    test_size = len(samples)
     for batch_idx in tqdm(range(0, test_size, batch_size)):
         curr_batch = samples[batch_idx : batch_idx + batch_size]
         input_ids = torch.stack(
@@ -630,36 +628,37 @@ def build_attn_hook_config(
 # %%
 
 batch_size = config["batch_size"]
+dev_size = 50
 
 # %%
 
 # Orig:
-#hook_config = []
-#orig_success, orig_mix, orig_fail = run(
-#   actor,
-#   samples,
-#   hook_config,
-#   batch_size,
-#)
-#print(f"Orig success: {orig_success}")
-#print(f"Orig mix: {orig_mix}")
-#print(f"Orig fail: {orig_fail}")
+hook_config = []
+orig_success, orig_mix, orig_fail = run(
+   actor,
+   samples[:dev_size],
+   hook_config,
+   batch_size,
+)
+print(f"Orig success: {orig_success}")
+print(f"Orig mix: {orig_mix}")
+print(f"Orig fail: {orig_fail}")
 
-## %%
+# %%
 
 # MLP (only [1]):
 
-#print("Running MLP (only [1])")
-#hook_config = build_mlp_hook_config(actor, probe_model, [1], list(range(18, 36)), 50)
-#mlp_1_success, mlp_1_mix, mlp_1_fail = run(
-#   actor,
-#   samples,
-#   hook_config,
-#   batch_size,
-#)
-#print(f"MLP 1 success: {mlp_1_success}")
-#print(f"MLP 1 mix: {mlp_1_mix}")
-#print(f"MLP 1 fail: {mlp_1_fail}")
+print("Running MLP (only [1])")
+hook_config = build_mlp_hook_config(actor, probe_model, [1], list(range(18, 36)), 50)
+mlp_1_success, mlp_1_mix, mlp_1_fail = run(
+   actor,
+   samples[:dev_size],
+   hook_config,
+   batch_size,
+)
+print(f"MLP 1 success: {mlp_1_success}")
+print(f"MLP 1 mix: {mlp_1_mix}")
+print(f"MLP 1 fail: {mlp_1_fail}")
 
 # %%
 
@@ -669,7 +668,7 @@ print("Running MLP (both [0, 1])")
 hook_config = build_mlp_hook_config(actor, probe_model, [0, 1], list(range(18, 36)), 50)
 mlp_both_success, mlp_both_mix, mlp_both_fail = run(
    actor,
-   samples,
+   samples[:dev_size],
    hook_config,
    batch_size,
 )
@@ -681,7 +680,6 @@ print(f"MLP both fail: {mlp_both_fail}")
 
 # Attention:
 
-dev_size = 50
 print("Running Attention")
 hook_config, attn_pattern = build_attn_hook_config(
     actor,
